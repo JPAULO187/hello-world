@@ -1,0 +1,364 @@
+CREATE DATABASE base_datosJPCQ;
+---------------------------------------------------------------------
+CREATE TABLE cuenta (
+    nro_cuenta NVARCHAR(14) PRIMARY KEY,
+    tipo CHAR(3),
+    moneda CHAR(3),
+    nombre NVARCHAR(40),
+    saldo DECIMAL(12, 2) DEFAULT 0.0
+);
+-----------------------------------------------------------------------
+CREATE TABLE movimiento (
+    nro_cuenta NVARCHAR(14),
+    fecha DATETIME,
+    tipo CHAR(1),
+    importe DECIMAL(12, 2),
+    tipo_cambio DECIMAL(15, 5),
+    glosa NVARCHAR(25),
+    PRIMARY KEY (nro_cuenta, fecha)
+);
+------------------------------------------------------------------------------------------
+CREATE PROCEDURE RegistrarNuevaCuentaConMovimiento
+    @nro_cuenta NVARCHAR(14),
+    @tipo CHAR(3),
+    @moneda CHAR(3),
+    @nombre NVARCHAR(40),
+    @importe DECIMAL(12, 2),
+    @tipo_cambio DECIMAL(15, 5),
+    @glosa NVARCHAR(25)
+AS
+BEGIN
+    DECLARE @fecha DATETIME = GETDATE(); -- Obtener la fecha actual
+
+    -- Verificar y ajustar la longitud de nro_cuenta según el tipo de cuenta
+    IF @tipo = 'AHO'
+    BEGIN
+        SET @nro_cuenta = LEFT(@nro_cuenta + '             ', 13);
+    END
+    ELSE IF @tipo = 'CTE'
+    BEGIN
+        SET @nro_cuenta = LEFT(@nro_cuenta + '              ', 14);
+    END
+    ELSE
+    BEGIN
+        PRINT 'Tipo de cuenta no válido.';
+        RETURN;
+    END
+
+    BEGIN TRANSACTION; -- Iniciar transacción
+
+    BEGIN TRY
+        -- Verificar si la cuenta ya existe
+        IF NOT EXISTS (SELECT 1 FROM cuenta WHERE nro_cuenta = @nro_cuenta)
+        BEGIN
+            -- Insertar nueva cuenta con saldo inicial en cero y la fecha actual
+            INSERT INTO cuenta (nro_cuenta, tipo, moneda, nombre, saldo)
+            VALUES (@nro_cuenta, @tipo, @moneda, @nombre, 0.0);
+
+            -- Insertar registro en la tabla movimiento con la fecha actual
+            INSERT INTO movimiento (nro_cuenta, fecha, tipo, importe, tipo_cambio, glosa)
+            VALUES (@nro_cuenta, @fecha, 'I', @importe, @tipo_cambio, @glosa);
+
+            -- Confirmar la transacción
+            COMMIT;
+            
+            -- Mensaje de éxito
+            PRINT 'Nueva cuenta registrada y movimiento registrado exitosamente.';
+        END
+        ELSE
+        BEGIN
+            -- Mensaje si la cuenta ya existe
+            PRINT 'La cuenta ya existe. No se puede registrar una cuenta duplicada.';
+        END
+    END TRY
+    BEGIN CATCH
+        -- Revertir la transacción en caso de error
+        ROLLBACK;
+        
+        -- Mensaje de error
+        PRINT 'Error al registrar la cuenta y movimiento.';
+    END CATCH
+END;
+
+-----------------------------------------------------------------------
+CREATE PROCEDURE RealizarTransaccion
+    @tipo_transaccion CHAR(1), -- 'R' para retiro, 'D' para depósito, 'T' para transferencia
+    @nro_cuenta_origen NVARCHAR(14),
+    @nro_cuenta_destino NVARCHAR(14) = NULL,
+    @importe DECIMAL(12, 2),
+    @tipo_cambio DECIMAL(15, 5) = NULL,
+    @glosa NVARCHAR(25) = NULL
+AS
+BEGIN
+    DECLARE @fecha DATETIME = GETDATE(); -- Obtener la fecha actual
+    
+    BEGIN TRANSACTION; -- Iniciar transacción
+
+    BEGIN TRY
+        -- Validar tipo de transacción
+        IF @tipo_transaccion NOT IN ('R', 'D', 'T')
+        BEGIN
+            RAISEERROR('Tipo de transacción no válido.', 16, 1);
+        END
+
+        -- Realizar acciones según el tipo de transacción
+        IF @tipo_transaccion = 'R' OR @tipo_transaccion = 'T'
+        BEGIN
+            -- Verificar si hay saldo suficiente para retiro o transferencia
+            IF (SELECT saldo FROM cuenta WHERE nro_cuenta = @nro_cuenta_origen) < @importe
+            BEGIN
+                RAISEERROR('Saldo insuficiente para realizar la transacción.', 16, 1);
+            END
+        END
+
+        IF @tipo_transaccion = 'R'
+        BEGIN
+            -- Retiro
+            UPDATE cuenta SET saldo = saldo - @importe WHERE nro_cuenta = @nro_cuenta_origen;
+        END
+        ELSE IF @tipo_transaccion = 'D'
+        BEGIN
+            -- Depósito
+            UPDATE cuenta SET saldo = saldo + @importe WHERE nro_cuenta = @nro_cuenta_origen;
+        END
+        ELSE IF @tipo_transaccion = 'T'
+        BEGIN
+            -- Transferencia
+            UPDATE cuenta SET saldo = saldo - @importe WHERE nro_cuenta = @nro_cuenta_origen;
+            UPDATE cuenta SET saldo = saldo + @importe WHERE nro_cuenta = @nro_cuenta_destino;
+        END
+
+        -- Registrar la transacción en la tabla movimiento
+        INSERT INTO movimiento (nro_cuenta, fecha, tipo, importe, tipo_cambio, glosa)
+        VALUES (@nro_cuenta_origen, @fecha, @tipo_transaccion, @importe, @tipo_cambio, @glosa);
+
+        IF @tipo_transaccion = 'T'
+        BEGIN
+            -- Registrar la transacción de transferencia en la tabla movimiento
+            INSERT INTO movimiento (nro_cuenta, fecha, tipo, importe, tipo_cambio, glosa)
+            VALUES (@nro_cuenta_destino, @fecha, @tipo_transaccion, @importe, @tipo_cambio, @glosa);
+        END
+
+        -- Confirmar la transacción
+        COMMIT;
+        
+        -- Mensaje de éxito
+        PRINT 'Transacción realizada exitosamente.';
+    END TRY
+    BEGIN CATCH
+        -- Revertir la transacción en caso de error
+        ROLLBACK;
+        
+        -- Mensaje de error
+        PRINT 'Error al realizar la transacción.';
+    END CATCH
+END;
+----------------------------------------------------------------------------------------------------
+CREATE PROCEDURE ConsultarSaldo
+    @nro_cuenta NVARCHAR(14)
+AS
+BEGIN
+    DECLARE @saldo_actual DECIMAL(12, 2);
+
+    -- Consultar saldo actual
+    SELECT @saldo_actual = saldo
+    FROM cuenta
+    WHERE nro_cuenta = @nro_cuenta;
+
+    -- Mostrar saldo actual
+    PRINT 'Saldo Actual de la cuenta ' + @nro_cuenta + ': ' + CAST(@saldo_actual AS NVARCHAR(20));
+END;
+----------------------------------------------------------------------------------------------------
+CREATE PROCEDURE ConsultarMovimientosHastaFecha
+    @nro_cuenta NVARCHAR(14),
+    @fecha_consulta DATETIME
+AS
+BEGIN
+    -- Consultar movimientos hasta la fecha
+    SELECT
+        fecha,
+        tipo,
+        importe,
+        tipo_cambio,
+        glosa
+    FROM movimiento
+    WHERE nro_cuenta = @nro_cuenta
+        AND fecha <= @fecha_consulta;
+END;
+
+----------------------------------------------------------------------------------------------------
+CREATE PROCEDURE ConsultarSaldoYMovimientos
+    @nro_cuenta NVARCHAR(14),
+    @fecha_consulta DATETIME
+AS
+BEGIN
+    -- Consultar saldo actual
+    DECLARE @saldo_actual DECIMAL(12, 2);
+
+    SELECT @saldo_actual = saldo
+    FROM cuenta
+    WHERE nro_cuenta = @nro_cuenta;
+
+    -- Consultar movimientos hasta la fecha
+    SELECT
+        fecha,
+        tipo,
+        importe,
+        tipo_cambio,
+        glosa
+    FROM movimiento
+    WHERE nro_cuenta = @nro_cuenta
+        AND fecha <= @fecha_consulta;
+
+    -- Mostrar saldo actual
+    PRINT 'Saldo Actual: ' + CAST(@saldo_actual AS NVARCHAR(20));
+END;
+----------------------------------------------------------------------------------------------------
+CREATE PROCEDURE MostrarSaldosCuentas
+AS
+BEGIN
+    -- Consultar información de las cuentas
+    SELECT
+        tipo AS TipoCuenta,
+        moneda AS Moneda,
+        nro_cuenta AS NumeroCuenta,
+        nombre AS Titular,
+        saldo AS Saldo
+    FROM cuenta;
+END;
+----------------------------------------------------------------------------------------------------
+conexion a la bd en el archivo json para API
+
+{
+"ConnectionStrings": {
+ "CadenaSQL": "Data Source (local); Initial Catalog=PRUEBAS; Integrated Security=true"
+},
+
+"Logging": {
+"LogLevel": {
+"Default": "Information",
+"Microsoft.AspNetCore": "Warning"
+}
+},
+"AllowedHosts": "*"
+}
+
+------------------------------------------------------------------------------------------------------
+controller conectando a la base
+
+--usando librerias
+using APICORE.Models;
+using System.Data;
+using System.Data.SqlClient;
+
+
+[Route("api/[controller]")]
+[ApiController]
+
+public class ProductoController : ControllerBase 
+{
+	private readonly string cadenaSQL;
+
+	public ProductoController(IConfiguration config) {
+	cadenaSQL = config.GetConnectionString("CadenaSQL");
+	}
+-----------------------------------------------------------------------
+realizando el servicio de listar
+
+[HttpGet]
+[Route("Lista")]
+
+public ActionResult Lista() {
+List<Producto> lista = new List<Producto>();
+	try
+	{
+		using (var conexion = new SqlConnection(cadenaSQL)) {
+			conexion.Open();
+			var cmd = new SqlCommand("sp_lista_productos", conexion); cmd.CommandType CommandType.Stored Procedure;
+			using (var rd = cmd.ExecuteReader()) {
+				while (rd.Read()) {
+				lista.Add(new Producto() {
+
+				IdProducto = Convert.ToInt32( rd["IdProducto"]), 
+				CodigoBarra rd["CodigoBarra"].ToString(), 
+				Nombre rd["Nombre"].ToString(), 
+				Marcard["Marca"].ToString(), 
+				Categoria rd["Categoria"].ToString(), 
+				Precio = Convert.ToDecimal(rd["Precio"])
+				});
+			}
+		}
+	}
+
+	return StatusCode(StatusCodes. Status2000K, new { mensaje "ok", response = lista });
+}
+	catch (Exception error) {
+	return StatusCode(StatusCodes.Status500InternalServerError, new { mensaje error.Message, response lista });
+}
+}
+-----------------------------------------------------------------------
+[HttpGet]
+[Route("Obtener/{NRO_CUENTA:int}")]
+
+public IActionResult Obtener(int NRO_CUENTA) {
+List<Producto> lista = new List<Producto>();
+Producto producto = new Producto
+	try
+	{
+		using (var conexion = new SqlConnection(cadenaSQL)) {
+			conexion.Open();
+			var cmd = new SqlCommand("sp_lista_productos", conexion); cmd.CommandType CommandType.Stored Procedure;
+			using (var rd = cmd.ExecuteReader()) {
+				while (rd.Read()) {
+				lista.Add(new Producto() {
+
+				IdProducto = Convert.ToInt32( rd["IdProducto"]), 
+				CodigoBarra rd["CodigoBarra"].ToString(), 
+				Nombre rd["Nombre"].ToString(), 
+				Marcard["Marca"].ToString(), 
+				Categoria rd["Categoria"].ToString(), 
+				Precio = Convert.ToDecimal(rd["Precio"])
+				});
+			}
+		}
+	}
+	producto = lista.Where(item=>item.NRO_CUENTA==NRO_CUENTA).FristOrDefault();
+	return StatusCode(StatusCodes. Status2000K, new { mensaje "ok", response = producto });
+}
+	catch (Exception error) {
+	return StatusCode(StatusCodes.Status500InternalServerError, new { mensaje error.Message, response producto });
+}
+}
+-----------------------------------------------------------------------
+metodo guardar
+
+[HttpPost]
+[Route("Guardar")]
+
+public IActionResult Guardar([FromBody] Producto objeto)
+{
+try
+
+using (var conexion = new SqlConnection(cadenaSQL))
+conexion.Open();
+var cad = new SqlCommand("sp_guardar producto", conexion); 
+cmd.Parameters.AddwithValue("codigoBarra", objeto. CodigoBarra); 
+cmd.Parameters.AddWithValue("nombre", objeto. Nombre); 
+cmd.Parameters.AddWithValue("marca", objeto. Marca); 
+cad.Parameters.AddWithValue("categoria", objeto. Categoria); 
+cad.Parameters.AddwithValue("precio", objeto. Precio); 
+cmd.CommandType = CommandType Stored Procedure;
+cnd.ExecuteNonQuery();
+}
+
+return StatusCode(StatusCodes.Status2000K, new { mensaje = "ok",);
+}
+catch (Exception error)
+{
+return StatusCode(StatusCodes.Status500InternalServerError, new { mensaje = error. Message });
+}
+-----------------------------------------------------------------------
+-----------------------------------------------------------------------
+-----------------------------------------------------------------------
+-----------------------------------------------------------------------
+-----------------------------------------------------------------------
